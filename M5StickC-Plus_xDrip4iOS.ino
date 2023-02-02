@@ -15,6 +15,10 @@
 #include <string>
 
 // Data Structures to store all information used by the app //
+struct readings {
+  int glycemia;
+  unsigned long time;
+};
 struct thresholds { // thresholds are defined as integers. If ever these values are sent from BLE, we may need to update if the value is double/float for those using mmol/l
   const int high = 180;
   const int low = 70;
@@ -26,15 +30,13 @@ struct xDripTimes {
   unsigned long localTimeFromBLE = 0;   // local time, in seconds since 1.1.1970 retrieved from client - this value remains fixed once retrieved. Value 0 means not yet retrieved.
   unsigned long millsSinceBLE = 0;      // time in milliseconds since start of the sketch, when localTimeFromBLE was received
   unsigned int sensorDifMin = 0;
-  //unsigned int prevSensorDifMin = -1;
   time_t sensTime = 0;
 };
 struct xDripInfo {
   bool show_mgdl = true; // true = display mg/DL, false = display mmol/L
   int glycemia = 0;
   float glycemiaMmolL = 0;
-  int prevGlycemia = 0;
-  int lastTwoGlycemia = 0;
+  readings bgReadings[4] = {{0,0},{0,0},{0,0},{0,0}};
   char sensDir[32];
   int arrowAngle = 180;
   int prevArrowAngle = 180;
@@ -96,7 +98,7 @@ void setup() {
 void loop() {
 
   if(millis()-msCount>10000) { // Turn the led on and refresh screen data *if needed* every 10 seconds
-    if (bleDeviceConnected && (xDrip.glycemia == 0 || xDrip.glycemia > xDrip.limits.highUrgent || xDrip.glycemia < xDrip.limits.lowUrgent)) {
+    if (bleDeviceConnected && (xDrip.glycemia > xDrip.limits.highUrgent || xDrip.glycemia < xDrip.limits.lowUrgent)) {
       // Turn on the red LED and off again in .2 second if glucose is more than 220 or less than 70 or if no reading received yet.
       digitalWrite(M5_LED, LOW);
       delay(200);
@@ -127,22 +129,30 @@ void loop() {
 //// FUNCTIONS ////
 void updateGlycemia(bool forceRedaw, bool newReadings) {
   // Update the display with the received values from xDrip
-  uint16_t text_color = TFT_WHITE;
   M5.Lcd.setCursor(0, 0);
-
+  uint16_t text_color = TFT_WHITE;
   unsigned long utcTimeInSeconds = getUTCTimeInSeconds();
+  bool showError = false;
+
+  // When xDrip4iOS disconnects from the sensor and then connets back, I noticed it sends the same reading multiple times, 
+  // so we will just compare the new reading with the previous one and if the values are the same (BG and sensor time) then ignore that new reading 
+  if (newReadings && xDrip.glycemia == xDrip.bgReadings[0].glycemia && xDrip.timeInfo.sensTime == xDrip.bgReadings[0].time) {
+    newReadings = false;
+  }
+
+  // Calculate number of minutes since last bg reading
   if (utcTimeInSeconds >  0L) {
     xDrip.timeInfo.sensorDifMin = (utcTimeInSeconds - xDrip.timeInfo.sensTime) / 60;
 
     if (xDrip.timeInfo.sensorDifMin > 59) {
-      xDrip.glycemia = 0; // latest nightscout reading is more than 1 hour old, don't show the value - value is "---"
+      showError = true; // latest nightscout reading is more than 1 hour old, don't show the value - value is "---"
     }
   }
 
   //********************************************************//
   // if values are new, then display them on screen         //
   //********************************************************//
-  if (xDrip.glycemia != xDrip.prevGlycemia || xDrip.arrowAngle != xDrip.prevArrowAngle || forceRedaw) {
+  if (xDrip.glycemia != xDrip.bgReadings[0].glycemia || xDrip.arrowAngle != xDrip.prevArrowAngle || forceRedaw || showError) {
     // Set the screen to black to print all again
     M5.Lcd.fillRect(0, 0,  M5.Lcd.width(),  M5.Lcd.height(), TFT_BLACK);
     // Determine size and position of text based on device rotation (with when horizontal is 135)
@@ -158,7 +168,7 @@ void updateGlycemia(bool forceRedaw, bool newReadings) {
       }
     }
     // Determine text color based on glycemia values
-    if (xDrip.glycemia == 0) {
+    if (showError) {
       text_color = TFT_WHITE;
     } else if (xDrip.glycemia >= xDrip.limits.highUrgent || xDrip.glycemia <= xDrip.limits.lowUrgent) {
       text_color = TFT_RED;
@@ -171,7 +181,7 @@ void updateGlycemia(bool forceRedaw, bool newReadings) {
     M5.Lcd.setTextColor(text_color, TFT_BLACK);
     M5.Lcd.setFreeFont(FSSB12); //FSSB9 //FSSB18 //FSSB24
     M5.Lcd.setTextDatum(MC_DATUM);
-    if (xDrip.glycemia == 0) {
+    if (showError) {
       M5.Lcd.drawString("---", M5.Lcd.width()/2 - xPosition, M5.Lcd.height()/2 + 10, GFXFF);
     } else {
       if (xDrip.show_mgdl) {
@@ -197,90 +207,23 @@ void updateGlycemia(bool forceRedaw, bool newReadings) {
   // Print minutes ago from last reading                    //
   //********************************************************//
   if (utcTimeInSeconds >  0L) {
-    uint16_t tdColor = TFT_DARKGREY;
-    if (xDrip.timeInfo.sensorDifMin > 5) {
-      tdColor = TFT_WHITE;
-      if (xDrip.timeInfo.sensorDifMin > 15) {
-        tdColor = TFT_RED;
-      }
-    }
-
-    char sensorDifStr[255];
-    if(xDrip.timeInfo.sensorDifMin > 5) {//59) {
-      strcpy(sensorDifStr, "Error");
-    } else {
-      sprintf(sensorDifStr, "%d min", xDrip.timeInfo.sensorDifMin);
-    }
-      
-    M5.Lcd.setTextDatum(MC_DATUM);
-    M5.Lcd.setFreeFont(FSSB12);
-    if (M5.Lcd.width() > 135) {
-      M5.Lcd.fillRoundRect(16, 8, 90, 26, 5, tdColor);
-      M5.Lcd.setTextSize(1);
-      M5.Lcd.setTextColor(TFT_BLACK, tdColor);
-      M5.Lcd.drawString(sensorDifStr, 58, 19, GFXFF);
-    } else {
-      M5.Lcd.fillRoundRect(M5.Lcd.width() / 2 - 45, 15, 90, 26, 5, tdColor);
-      M5.Lcd.setTextSize(1);
-      M5.Lcd.setTextColor(TFT_BLACK, tdColor);
-      M5.Lcd.drawString(sensorDifStr, M5.Lcd.width() / 2, 26, GFXFF);
-    }
+    printMinsAgo();
   }
 
   //********************************************************//
   // Print delta if there are three consecutive readings    //
   //********************************************************//
-  char deltaStr[255];
-  bool updateDelta = false;
-  if (xDrip.glycemia > 0 && xDrip.prevGlycemia > 0 && xDrip.lastTwoGlycemia > 0 && newReadings) {
-    int delta = xDrip.glycemia - xDrip.lastTwoGlycemia;
-    if (delta > 0) {
-      if (xDrip.show_mgdl) {
-        sprintf(deltaStr, "+%d mg/dl", delta);
-      } else {
-        sprintf(deltaStr, "+%4.1f mmol/l", delta/18.0);
-      }
-    } else {
-      if (xDrip.show_mgdl) {
-        sprintf(deltaStr, "%d mg/dl", delta);
-      } else {
-        sprintf(deltaStr, "%4.1f mmol/l", delta/18.0);
-      }
-    }
-    updateDelta = true;
-  } else if (xDrip.timeInfo.sensorDifMin > 5) {
-      strcpy(deltaStr, "???");
-      updateDelta = true;
-  } else {
-    updateDelta = false;
+  if (xDrip.timeInfo.sensorDifMin > 5) {
+    hideDelta();
+  } else if (hasPreviousReadings() && newReadings) {
+    printDelta();
   }
 
-  if (updateDelta) {
-    if (xDrip.show_mgdl) {
-      M5.Lcd.setFreeFont(FSSB12);
-    } else {
-      M5.Lcd.setFreeFont(FSSB9);
-    }
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-    if (M5.Lcd.width() > 135) {
-      M5.Lcd.setTextDatum(MR_DATUM);
-      M5.Lcd.fillRect(110, 1, M5.Lcd.width() - 110, 40, TFT_BLACK);
-      M5.Lcd.drawString(deltaStr, M5.Lcd.width() - 16, 21, GFXFF);
-    } else {
-      M5.Lcd.setTextDatum(MC_DATUM);
-      M5.Lcd.fillRect(1, 48, M5.Lcd.width(), 30, TFT_BLACK);
-      M5.Lcd.drawString(deltaStr, M5.Lcd.width() / 2, 60, GFXFF);
-    }
-  }
-
-  //********************************************************//
+  //*******************************.*************************//
   // Reset previous values with current values              //
   //********************************************************//  
   if (newReadings) {
-    xDrip.lastTwoGlycemia = xDrip.prevGlycemia;
-    xDrip.prevGlycemia = xDrip.glycemia;
-    xDrip.prevArrowAngle = xDrip.arrowAngle;
+    updateReadings();
   }
 };
 
@@ -306,7 +249,9 @@ void updateBrightness() {
 };
 void setArrowAngle() {
   xDrip.arrowAngle = 180;
-  if (strcmp(xDrip.sensDir,"DoubleDown")==0 || strcmp(xDrip.sensDir,"SingleDown")==0) {
+  if (strcmp(xDrip.sensDir,"DoubleDown")==0) {
+    xDrip.arrowAngle = 91;
+  } else if (strcmp(xDrip.sensDir,"SingleDown")==0) {
     xDrip.arrowAngle = 90;
   } else if (strcmp(xDrip.sensDir,"FortyFiveDown")==0) {
     xDrip.arrowAngle = 45;
@@ -314,47 +259,61 @@ void setArrowAngle() {
     xDrip.arrowAngle = 0;
   } else if (strcmp(xDrip.sensDir,"FortyFiveUp")==0) {
     xDrip.arrowAngle = -45;
-  } else if (strcmp(xDrip.sensDir,"SingleUp")==0 || strcmp(xDrip.sensDir,"DoubleUp")==0) {
+  } else if (strcmp(xDrip.sensDir,"SingleUp")==0) {
     xDrip.arrowAngle = -90;
+  } else if (strcmp(xDrip.sensDir,"DoubleUp")==0) {
+    xDrip.arrowAngle = -91;
   }
 };
 void drawArrow(int width, int height, int angle, uint16_t color, bool isSmall) {
-  if (xDrip.arrowAngle == 90) { // Down
+  if (xDrip.arrowAngle == 91) { // Double Down
     if (isSmall) {
-      drawArrow(width / 2 + 2, height / 2 + 60, angle, color);
+      drawArrow(width / 2 + 2, height / 2 + 60, angle - 1, color, 2);
     } else {
-      drawArrow(width - 40, height / 2 - 4, angle, color);
+      drawArrow(width - 40, height / 2 - 4, angle - 1, color, 2);
+    }
+  } else if (xDrip.arrowAngle == 90) { // Down
+    if (isSmall) {
+      drawArrow(width / 2 + 2, height / 2 + 60, angle, color, 1);
+    } else {
+      drawArrow(width - 40, height / 2 - 4, angle, color, 1);
     }
   } else if (xDrip.arrowAngle == 45) { // 45 Down
     if (isSmall) {
-      drawArrow(width / 2 - 12, height / 2 + 60, angle, color);
+      drawArrow(width / 2 - 12, height / 2 + 60, angle, color, 1);
     } else {
-      drawArrow(width - 50, height / 2 + 2, angle, color);
+      drawArrow(width - 50, height / 2 + 2, angle, color, 1);
     }
   } else if (xDrip.arrowAngle == 0) { // Flat
     if (isSmall) {
-      drawArrow(width / 2 - 15, height / 2 + 80, angle, color);
+      drawArrow(width / 2 - 15, height / 2 + 80, angle, color, 1);
     } else {
-      drawArrow(width - 56, height / 2 + 10, angle, color);
+      drawArrow(width - 56, height / 2 + 10, angle, color, 1);
     }
   } else if(xDrip.arrowAngle == -45) { // 45 Up.
     if (isSmall) {
-      drawArrow(width / 2 - 18, height / 2 + 94, angle, color);
+      drawArrow(width / 2 - 18, height / 2 + 94, angle, color, 1);
     } else {
-      drawArrow(width - 50, height / 2 + 30, angle, color);
+      drawArrow(width - 50, height / 2 + 30, angle, color, 1);
     }
   } else if (xDrip.arrowAngle == -90) { // Up
     if (isSmall) {
-      drawArrow(width / 2 - 2, height / 2 + 100, angle, color);
+      drawArrow(width / 2 - 2, height / 2 + 100, angle, color, 1);
     } else {
-      drawArrow(width - 36, height / 2 + 32, angle, color);
+      drawArrow(width - 36, height / 2 + 32, angle, color, 1);
+    }
+  } else if (xDrip.arrowAngle == -91) { // Double Up
+    if (isSmall) {
+      drawArrow(width / 2 - 2, height / 2 + 100, angle + 1, color, 2);
+    } else {
+      drawArrow(width - 36, height / 2 + 32, angle + 1, color, 2);
     }
   }
 };
-void drawArrow(int x, int y, int aangle, uint16_t color) {
+void drawArrow(int x, int y, int aangle, uint16_t color, int arrowCount) {
   float dx = 2*cos(aangle-90)*PI/180+x; // calculate X position
   float dy = 2*sin(aangle-90)*PI/180+y; // calculate Y position
-  float x1 = 0;         float y1 = 40;
+  float x1 = 0;   float y1 = 40;
   float x2 = 20;  float y2 = 20;
   float x3 = -20; float y3 = 20;
   float angle = aangle*PI/180-135;
@@ -365,15 +324,28 @@ void drawArrow(int x, int y, int aangle, uint16_t color) {
   float xx3 = x3*cos(angle)-y3*sin(angle)+dx;
   float yy3 = y3*cos(angle)+x3*sin(angle)+dy;
   M5.Lcd.fillTriangle(xx1,yy1,xx3,yy3,xx2,yy2, color);
-  M5.Lcd.drawLine(x, y, xx1, yy1, color);
-  M5.Lcd.drawLine(x+1, y, xx1+1, yy1, color);
-  M5.Lcd.drawLine(x, y+1, xx1, yy1+1, color);
-  M5.Lcd.drawLine(x-1, y, xx1-1, yy1, color);
-  M5.Lcd.drawLine(x, y-1, xx1, yy1-1, color);
-  M5.Lcd.drawLine(x+2, y, xx1+2, yy1, color);
-  M5.Lcd.drawLine(x, y+2, xx1, yy1+2, color);
-  M5.Lcd.drawLine(x-2, y, xx1-2, yy1, color);
-  M5.Lcd.drawLine(x, y-2, xx1, yy1-2, color);
+  if (arrowCount == 2) {
+    if (aangle > 0) {
+      drawArrowLine(x, y, xx1, yy1, -6, -12, color);
+      drawArrowLine(x, y, xx1, yy1, 6, -12, color);
+    } else {
+      drawArrowLine(x, y, xx1, yy1, -6, 12, color);
+      drawArrowLine(x, y, xx1, yy1, 6, 12, color);
+    }
+  } else {
+    drawArrowLine(x, y, xx1, yy1, 0, 0, color);
+  }
+};
+void drawArrowLine(int x, int y, int xx1, int yy1, int xIncrease, int yIncrease, uint16_t color) {
+    M5.Lcd.drawLine(x + xIncrease, y, xx1 + xIncrease, yy1 + yIncrease, color);
+    M5.Lcd.drawLine(x+1 + xIncrease, y, xx1+1 + xIncrease, yy1 + yIncrease, color);
+    M5.Lcd.drawLine(x + xIncrease, y+1, xx1 + xIncrease, yy1+1 + yIncrease, color);
+    M5.Lcd.drawLine(x-1 + xIncrease, y, xx1-1 + xIncrease, yy1 + yIncrease, color);
+    M5.Lcd.drawLine(x + xIncrease, y-1, xx1 + xIncrease, yy1-1 + yIncrease, color);
+    M5.Lcd.drawLine(x+2 + xIncrease, y, xx1+2 + xIncrease, yy1 + yIncrease, color);
+    M5.Lcd.drawLine(x + xIncrease, y+2, xx1 + xIncrease, yy1+2 + yIncrease, color);
+    M5.Lcd.drawLine(x-2 + xIncrease, y, xx1-2 + xIncrease, yy1 + yIncrease, color);
+    M5.Lcd.drawLine(x + xIncrease, y-2, xx1 + xIncrease, yy1-2 + yIncrease, color);
 };
 unsigned long getLocalTimeInSeconds() {
   // Start by trying timestamp received from BLE client, if so calculate it and return if not get it from ble server
@@ -404,6 +376,105 @@ int sizeOfStringInCharArray(char stringtext[], int arraysize) {
     returnValue = returnValue + 1;
   }
   return returnValue;
+};
+void hideDelta() {
+  if (M5.Lcd.width() > 135) {
+    M5.Lcd.fillRect(110, 1, M5.Lcd.width() - 110, 40, TFT_BLACK);
+  } else {
+    M5.Lcd.fillRect(1, 48, M5.Lcd.width(), 30, TFT_BLACK);
+  }
+};
+void printDelta() {
+  int delta = calculateDelta();
+  if (delta == 1000) {
+    hideDelta();
+  } else {
+    char deltaStr[255];
+    if (delta > 0) {
+      if (xDrip.show_mgdl) {
+        sprintf(deltaStr, "+%d mg/dl", delta);
+      } else {
+        sprintf(deltaStr, "+%4.1f mmol/l", delta/18.0);
+      }
+    } else {
+      if (xDrip.show_mgdl) {
+        sprintf(deltaStr, "%d mg/dl", delta);
+      } else {
+        sprintf(deltaStr, "%4.1f mmol/l", delta/18.0);
+      }
+    }
+
+    hideDelta();
+    if (xDrip.show_mgdl) {
+      M5.Lcd.setFreeFont(FSSB12);
+    } else {
+      M5.Lcd.setFreeFont(FSSB9);
+    }
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+    if (M5.Lcd.width() > 135) {
+      M5.Lcd.setTextDatum(MR_DATUM);
+      M5.Lcd.drawString(deltaStr, M5.Lcd.width() - 16, 21, GFXFF);
+    } else {
+      M5.Lcd.setTextDatum(MC_DATUM);
+      M5.Lcd.drawString(deltaStr, M5.Lcd.width() / 2, 60, GFXFF);
+    }
+  }
+};
+bool hasPreviousReadings() {
+  bool isCompleted = true;
+  for (int i = 0; i < 4; i++) {
+    if (xDrip.bgReadings[i].glycemia == 0) {
+      isCompleted = false;
+    }
+  }
+  return isCompleted;
+};
+int calculateDelta() {
+  int delta = 1000;
+  for (int i=3; i>=0; i--) {
+    if (xDrip.timeInfo.sensTime - xDrip.bgReadings[i].time <= 300) { // Get earlier reading that is 5 minutes or less away from current reading
+      delta = xDrip.glycemia - xDrip.bgReadings[i].glycemia;
+      break;
+    }
+  }
+  return delta;
+};
+void updateReadings() {
+  for (int i = 3; i > 0; i--) {
+    xDrip.bgReadings[i] = xDrip.bgReadings[i-1];
+  }
+  xDrip.bgReadings[0].glycemia = xDrip.glycemia;
+  xDrip.bgReadings[0].time = xDrip.timeInfo.sensTime;
+  xDrip.prevArrowAngle = xDrip.arrowAngle;
+};
+void printMinsAgo() {
+  uint16_t tdColor = TFT_DARKGREY;
+  if (xDrip.timeInfo.sensorDifMin > 5) {
+    tdColor = TFT_WHITE;
+    if (xDrip.timeInfo.sensorDifMin > 15) {
+      tdColor = TFT_RED;
+    }
+  }
+
+  char sensorDifStr[255];
+  if(xDrip.timeInfo.sensorDifMin > 59) {
+    strcpy(sensorDifStr, "Error");
+  } else {
+    sprintf(sensorDifStr, "%d min", xDrip.timeInfo.sensorDifMin);
+  }
+      
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.setFreeFont(FSSB12);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(TFT_BLACK, tdColor);
+  if (M5.Lcd.width() > 135) {
+    M5.Lcd.fillRoundRect(16, 8, 90, 26, 5, tdColor);
+    M5.Lcd.drawString(sensorDifStr, 58, 19, GFXFF);
+  } else {
+    M5.Lcd.fillRoundRect(M5.Lcd.width() / 2 - 45, 15, 90, 26, 5, tdColor);
+    M5.Lcd.drawString(sensorDifStr, M5.Lcd.width() / 2, 26, GFXFF);
+  }
 };
 
 //// BLE declarations ////
